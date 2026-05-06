@@ -1,0 +1,88 @@
+# ==============================================================================
+# Workflow: Feature Branch Checks (feature-checks.yml)
+#
+# WHAT:   Runs terraform fmt and terraform validate on every push to a feature
+#         branch, providing fast formatting feedback before a PR is opened.
+#         A fmt failure emits a workflow annotation that appears inline on the
+#         commit diff view in GitHub, pinpointing the offending push.
+#
+# WHEN:   push to any branch except main.
+#         In-progress runs for the same branch are cancelled on new pushes
+#         to avoid queueing stale checks.
+#
+# REQUIRED SECRETS (GitHub Settings > Secrets and variables > Actions):
+#   TF_API_TOKEN        - HCP Terraform API token (team token with write access)
+#
+#   Azure credentials are NOT required — validate runs with -backend=false,
+#   which skips remote state auth and downloads providers without plan/apply.
+#
+# FUTURE:  Infracost will optionally run here as a non-blocking advisory step.
+# ==============================================================================
+
+name: Feature Branch Checks
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+# Cancel the in-progress run for the same branch when a new commit is pushed.
+concurrency:
+  group: feature-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read # checkout only — no PR write needed on feature branches
+
+env:
+  TF_IN_AUTOMATION: "true" # suppresses interactive prompts in all terraform calls
+
+jobs:
+
+  # ----------------------------------------------------------------------------
+  # TF Format & Validate
+  # Intentionally lightweight: no Azure credentials, no remote state connection.
+  # Both fmt and validate complete in under 60 seconds on a cold runner.
+  # ----------------------------------------------------------------------------
+  validate:
+    name: TF Format & Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # cli_config_credentials_token writes ~/.terraformrc for HCP Terraform auth.
+      # Even though validate runs with -backend=false, the token is still needed
+      # if the workspace uses a private module registry during `init`.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.15.1"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      # continue-on-error lets the annotation step below always execute so the
+      # developer sees a clear inline error on the commit before the job fails.
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive .
+        continue-on-error: true
+
+      # ::error:: emits a workflow annotation that GitHub renders inline on the
+      # commit diff, making the formatting problem visible without clicking into
+      # the job log. This does not echo any secret value.
+      - name: Annotate fmt failure
+        if: steps.fmt.outcome == 'failure'
+        run: |
+          echo "::error::terraform fmt check failed. Run 'terraform fmt -recursive .' locally and commit the result."
+          exit 1
+
+      # -backend=false skips the HCP Terraform workspace connection entirely.
+      # validate only performs static analysis: type checking, expression syntax,
+      # and provider schema validation against downloaded provider binaries.
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
