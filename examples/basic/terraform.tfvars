@@ -1,5 +1,5 @@
 subscription_id     = "00000000-0000-0000-0000-000000000000"
-resource_group_name = "rg-bdt-terraform-dev-eus2-001"
+resource_group_name = "rg-bdt-terdraform-dev-eus2-001"
 location            = "eastus2"
 vnet_name           = "vnet-tfwkst-dev-eus2-001"
 address_space       = ["10.10.0.0/16"]
