@@ -1,11 +1,11 @@
 module "spoke_vnet" {
   source = "git::https://github.com/bdtmsd/tf-iac-vnet-module.git?ref=v1.0.0"
 
-  subscription_id     = "00000000-0000-0000-0000-000000000000"
-  resource_group_name = "rg-bdt-terraform-dev-eus2-001"
-  location            = "eastus2"
-  vnet_name           = "vnet-tfwkst-dev-eus2-001"
-  address_space       = ["10.10.0.0/16"]
+  subscription_id     = var.subscription_id
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  vnet_name           = var.vnet_name
+  address_space       = var.address_space
 
   subnets = {
     "snet-app-dev-eus2-001" = {
