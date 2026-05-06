@@ -1,0 +1,313 @@
+# ==============================================================================
+# Workflow: PR Checks (pr-checks.yml)
+#
+# WHAT:   Three required status checks that must pass before any PR can merge
+#         into main, enforcing the FDD §2.2.4 quality gate:
+#           1. TF Format & Validate  — formatting and schema correctness
+#           2. HCP Terraform Speculative Plan — remote plan via HCP Terraform,
+#              streamed back and posted as a collapsible PR comment
+#           3. TF-test — pytest/tftest plan-based unit tests with Azure SP auth
+#
+# WHEN:   Every pull_request event targeting the main branch.
+#         In-progress runs for the same PR are cancelled on new pushes.
+#
+# REQUIRED SECRETS (GitHub Settings > Secrets and variables > Actions):
+#   TF_API_TOKEN        - HCP Terraform API token (team token with write access)
+#   ARM_CLIENT_ID       - Azure Service Principal client ID
+#   ARM_CLIENT_SECRET   - Azure Service Principal client secret
+#   ARM_TENANT_ID       - Azure Entra ID tenant ID
+#   ARM_SUBSCRIPTION_ID - Azure subscription ID
+#
+# STATUS CHECK NAMES (must be registered in Branch Protection exactly as shown):
+#   "HCP Terraform Speculative Plan"
+#   "TF-test"
+#
+# FUTURE:  Infracost cost-estimation step will be added to the speculative-plan
+#          job once the Infracost GitHub Action is approved for the pipeline.
+# ==============================================================================
+
+name: PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# Cancel any previous run for the same PR the moment a new commit is pushed.
+# This prevents stale plan comments and wasted runner minutes.
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read       # checkout
+  pull-requests: write # post plan/test comments
+  id-token: write      # reserved for future OIDC expansion
+
+# Workflow-level env keeps all jobs consistent without repeating flags.
+env:
+  TF_IN_AUTOMATION: "true"       # suppresses interactive prompts in all terraform calls
+  TF_CLI_ARGS_plan: "-no-color"  # strip ANSI codes so PR comment renders cleanly
+
+jobs:
+
+  # ----------------------------------------------------------------------------
+  # Job 1: TF Format & Validate
+  # Fast (<2 min) gate that catches formatting and schema errors before the
+  # heavier speculative plan and test jobs are allowed to start.
+  # ----------------------------------------------------------------------------
+  validate:
+    name: TF Format & Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # cli_config_credentials_token writes a ~/.terraformrc that authenticates
+      # `terraform init` against the HCP Terraform API without exposing the token
+      # in any run step or log line.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.15.1"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      # -check exits non-zero if any file diverges from canonical HCL format.
+      # -recursive traverses all sub-directories including examples/.
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive .
+
+      # -backend=false skips remote state auth; validate only checks schema and
+      # expression types, it does not need a live workspace connection.
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  # ----------------------------------------------------------------------------
+  # Job 2: HCP Terraform Speculative Plan
+  # Triggers a remote speculative plan in HCP Terraform and streams the output
+  # back to the runner. The full plan is posted as a collapsible PR comment,
+  # replacing any stale comment from a previous push to this PR.
+  #
+  # This job name is a required GitHub Branch Protection status check —
+  # do not rename it without updating the branch protection rule.
+  # ----------------------------------------------------------------------------
+  speculative-plan:
+    name: HCP Terraform Speculative Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: validate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.15.1"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          # Disable the wrapper shim so tee + PIPESTATUS capture the raw exit code.
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+
+      # Speculative plans run remotely in HCP Terraform; output streams to stdout.
+      # continue-on-error ensures the comment step always runs, even on plan errors.
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -no-color 2>&1 | tee plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      # Replaces any previous plan comment on this PR to keep the thread tidy.
+      # Reads from a file — never prints or interpolates the ARM_* secrets.
+      - name: Post Plan Output to PR
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs   = require('fs');
+            const path = require('path');
+
+            const raw = fs.readFileSync(
+              path.join(process.env.GITHUB_WORKSPACE, 'plan_output.txt'), 'utf8'
+            );
+
+            // GitHub PR comments are capped; truncate gracefully if the plan is large.
+            const MAX    = 65000;
+            const output = raw.length > MAX
+              ? raw.slice(0, MAX) + '\n\n… output truncated — see the full run log'
+              : raw;
+
+            const exitCode = process.env.PLAN_EXITCODE;
+            const status   = exitCode === '0' ? '✅ Plan succeeded (no changes)'
+                                              : '❌ Plan failed';
+
+            const body = [
+              `## HCP Terraform Speculative Plan — ${status}`,
+              '',
+              '<details><summary>Click to expand plan output</summary>',
+              '',
+              '```hcl',
+              output,
+              '```',
+              '</details>',
+              '',
+              `> Workflow \`${{ github.workflow }}\` · [Run #${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+            ].join('\n');
+
+            // Remove stale plan comments so only the latest is visible.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const c of comments) {
+              if (c.user.type === 'Bot' &&
+                  c.body.startsWith('## HCP Terraform Speculative Plan')) {
+                await github.rest.issues.deleteComment({
+                  owner:      context.repo.owner,
+                  repo:       context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      # Propagate the plan failure after the comment has been posted.
+      - name: Fail if plan failed
+        if: steps.plan.outputs.exitcode != '0'
+        run: |
+          echo "::error::Terraform plan failed with exit code ${{ steps.plan.outputs.exitcode }}."
+          exit 1
+
+  # ----------------------------------------------------------------------------
+  # Job 3: TF-test
+  # Runs pytest/tftest plan-based unit tests against examples/basic/.
+  # The Azure Service Principal authenticates the azurerm provider during the
+  # terraform plan subprocess calls made internally by tftest fixtures.
+  #
+  # This job name is a required GitHub Branch Protection status check —
+  # do not rename it without updating the branch protection rule.
+  # ----------------------------------------------------------------------------
+  tftest:
+    name: TF-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: validate
+
+    # ARM_* env vars are consumed by the azurerm provider inside tftest subprocess
+    # calls. They are masked automatically by GitHub Actions in all log output.
+    env:
+      ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET:   ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID:       ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.15.1"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          # tftest spawns terraform as a subprocess; the wrapper shim would
+          # intercept stdout/stderr and break exit code propagation.
+          terraform_wrapper: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Python dependencies
+        run: pip install pytest tftest
+
+      # continue-on-error so the comment step always runs, even on test failure.
+      - name: Run pytest / tftest
+        id: test
+        run: |
+          set +e
+          pytest tests/ -v --no-header --tb=short 2>&1 | tee "${{ github.workspace }}/test_output.txt"
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+        continue-on-error: true
+
+      # Replaces any previous test comment on this PR to keep the thread tidy.
+      - name: Post Test Results to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs   = require('fs');
+            const path = require('path');
+
+            const raw = fs.readFileSync(
+              path.join(process.env.GITHUB_WORKSPACE, 'test_output.txt'), 'utf8'
+            );
+
+            const MAX    = 65000;
+            const output = raw.length > MAX
+              ? raw.slice(0, MAX) + '\n\n… output truncated — see the full run log'
+              : raw;
+
+            const code   = '${{ steps.test.outputs.exit_code }}';
+            const status = code === '0' ? '✅ All tests passed' : '❌ Tests failed';
+
+            const body = [
+              `## TF-test (pytest) — ${status}`,
+              '',
+              '<details><summary>Click to expand test output</summary>',
+              '',
+              '```',
+              output,
+              '```',
+              '</details>',
+              '',
+              `> Workflow \`${{ github.workflow }}\` · [Run #${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const c of comments) {
+              if (c.user.type === 'Bot' && c.body.startsWith('## TF-test (pytest)')) {
+                await github.rest.issues.deleteComment({
+                  owner:      context.repo.owner,
+                  repo:       context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail if tests failed
+        if: steps.test.outputs.exit_code != '0'
+        run: |
+          echo "::error::pytest/tftest tests failed — review the output above."
+          exit 1
