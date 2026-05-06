@@ -59,7 +59,7 @@ variable "subnets" {
     Map of subnet objects. Key = subnet name (pattern: snet-<workload>-<env>-<region>-<instance>).
     Each subnet can optionally reference an existing NSG or Route Table by resource ID.
   EOT
-  default = {}
+  default     = {}
 }
 
 variable "hub_vnet_id" {
@@ -98,7 +98,7 @@ variable "tags" {
   validation {
     condition = alltrue([
       for k in ["Application", "DevOwner", "BusinessOwner", "Environment",
-        "DataClassification", "BusinessCriticality", "IACRepository"] :
+      "DataClassification", "BusinessCriticality", "IACRepository"] :
       contains(keys(var.tags), k)
     ])
     error_message = "tags must include: Application, DevOwner, BusinessOwner, Environment, DataClassification, BusinessCriticality, IACRepository."
