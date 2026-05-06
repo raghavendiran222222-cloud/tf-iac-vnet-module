@@ -51,6 +51,29 @@ env:
 jobs:
 
   # ----------------------------------------------------------------------------
+  # Job 0: Check whether Azure credentials are available as secrets.
+  # speculative-plan and tftest depend on this output so they skip cleanly
+  # instead of failing when secrets have not yet been configured.
+  # ----------------------------------------------------------------------------
+  check-secrets:
+    name: Check Azure Credentials
+    runs-on: ubuntu-latest
+    outputs:
+      has-azure-creds: ${{ steps.check.outputs.has-azure-creds }}
+    steps:
+      - name: Detect secrets
+        id: check
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+        run: |
+          if [[ -n "$ARM_CLIENT_ID" ]]; then
+            echo "has-azure-creds=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::ARM_CLIENT_ID secret not set — speculative-plan and tftest will be skipped."
+            echo "has-azure-creds=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ----------------------------------------------------------------------------
   # Job 1: TF Format & Validate
   # Fast (<2 min) gate that catches formatting and schema errors before the
   # heavier plan and test jobs are allowed to start.
@@ -103,7 +126,8 @@ jobs:
     name: HCP Terraform Speculative Plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: validate
+    needs: [validate, check-secrets]
+    if: needs.check-secrets.outputs.has-azure-creds == 'true'
 
     env:
       ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
@@ -234,7 +258,8 @@ jobs:
     name: TF-test
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: validate
+    needs: [validate, check-secrets]
+    if: needs.check-secrets.outputs.has-azure-creds == 'true'
 
     env:
       ARM_CLIENT_ID:          ${{ secrets.ARM_CLIENT_ID }}
