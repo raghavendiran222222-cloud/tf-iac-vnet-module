@@ -5,8 +5,8 @@
 #         into main, enforcing the FDD §2.2.4 quality gate:
 #           1. TF Format & Validate  — formatting and schema correctness (root)
 #           2. HCP Terraform Speculative Plan — local terraform plan run against
-#              examples/basic with -backend=false; no HCP Terraform workspace
-#              needed. Module repos have no state — this is a compilation check.
+#              examples/basic with -backend=false; module source is redirected
+#              to ../../ via override.tf so no git tag needs to exist in CI.
 #           3. TF-test — pytest/tftest plan-based unit tests with Azure SP auth
 #
 # WHEN:   Every pull_request event targeting the main branch.
@@ -18,10 +18,8 @@
 #   ARM_TENANT_ID       - Azure Entra ID tenant ID
 #   ARM_SUBSCRIPTION_ID - Azure subscription ID
 #
-#   Note: TF_API_TOKEN is NOT required — this module repo has no HCP Terraform
-#   workspace. Plans run locally against examples/basic with -backend=false.
-#
 # STATUS CHECK NAMES (must be registered in Branch Protection exactly as shown):
+#   "TF Format & Validate"
 #   "HCP Terraform Speculative Plan"
 #   "TF-test"
 #
@@ -66,8 +64,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # No cli_config_credentials_token needed — this module repo has no HCP
-      # Terraform workspace. Providers are downloaded from the public registry.
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
@@ -89,9 +85,16 @@ jobs:
   # ----------------------------------------------------------------------------
   # Job 2: HCP Terraform Speculative Plan
   # Runs terraform plan locally against examples/basic with -backend=false.
-  # This is a compilation check — it validates the module API (inputs/outputs)
-  # and provider resource schema without touching any real Azure resources.
-  # Plan output is posted as a collapsible PR comment.
+  #
+  # Two CI-only overrides are applied before init:
+  #   override.tf    — redirects module source from the git tag URL to ../../
+  #                    so init works before v1.0.0 tag exists on the repo.
+  #   -var flag      — replaces the placeholder subscription_id (00000000-...)
+  #                    with the real value from ARM_SUBSCRIPTION_ID secret so
+  #                    the azurerm provider can authenticate during plan.
+  #
+  # These overrides exist only in the runner's workspace; they are never
+  # committed to the repository.
   #
   # This job name is a required GitHub Branch Protection status check —
   # do not rename it without updating the branch protection rule.
@@ -102,8 +105,6 @@ jobs:
     timeout-minutes: 30
     needs: validate
 
-    # ARM_* authenticate the azurerm provider so it can fetch its schema during
-    # plan. The provider schema is needed even with -backend=false.
     env:
       ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
       ARM_CLIENT_SECRET:   ${{ secrets.ARM_CLIENT_SECRET }}
@@ -121,30 +122,35 @@ jobs:
           # Disable the wrapper shim so tee + PIPESTATUS capture the raw exit code.
           terraform_wrapper: false
 
-      # examples/basic sources this module from GitHub. Configure git to use the
-      # built-in GITHUB_TOKEN so terraform init can pull it without extra secrets.
-      - name: Configure git credentials for module source
+      # Redirect the module source to the local checkout instead of the git tag.
+      # Terraform's override file mechanism replaces any matching block attribute,
+      # so this cleanly overrides only the source without touching other inputs.
+      - name: Override module source to local path
         run: |
-          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          cat > examples/basic/override.tf << 'EOF'
+          module "spoke_vnet" {
+            source = "../../"
+          }
+          EOF
 
-      # Run init and plan inside examples/basic — that is the consumable
-      # configuration that exercises every input variable of this module.
       - name: Terraform Init
         working-directory: examples/basic
         run: terraform init -backend=false
 
-      # -backend=false skips state entirely; this is a pure schema + logic check.
-      # continue-on-error so the comment step always runs even on plan failure.
+      # -var overrides the placeholder subscription_id in main.tf with the real
+      # value so the azurerm provider can authenticate against Azure during plan.
+      # The secret value is passed via env var — never interpolated into the log.
       - name: Terraform Plan
         id: plan
         working-directory: examples/basic
         run: |
-          terraform plan -backend=false -no-color 2>&1 | tee "${{ github.workspace }}/plan_output.txt"
+          terraform plan -backend=false -no-color \
+            -var "subscription_id=$ARM_SUBSCRIPTION_ID" \
+            2>&1 | tee "${{ github.workspace }}/plan_output.txt"
           echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       # Replaces any previous plan comment on this PR to keep the thread tidy.
-      # Reads from a file — never prints or interpolates ARM_* secret values.
       - name: Post Plan Output to PR
         uses: actions/github-script@v7
         env:
@@ -158,7 +164,6 @@ jobs:
               path.join(process.env.GITHUB_WORKSPACE, 'plan_output.txt'), 'utf8'
             );
 
-            // GitHub PR comments are capped; truncate gracefully if the plan is large.
             const MAX    = 65000;
             const output = raw.length > MAX
               ? raw.slice(0, MAX) + '\n\n… output truncated — see the full run log'
@@ -182,7 +187,6 @@ jobs:
               `> Workflow \`${{ github.workflow }}\` · [Run #${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
             ].join('\n');
 
-            // Remove stale plan comments so only the latest is visible.
             const { data: comments } = await github.rest.issues.listComments({
               owner:        context.repo.owner,
               repo:         context.repo.repo,
@@ -207,7 +211,6 @@ jobs:
               body,
             });
 
-      # Propagate the plan failure after the comment has been posted.
       - name: Fail if plan failed
         if: steps.plan.outputs.exitcode != '0'
         run: |
@@ -217,8 +220,12 @@ jobs:
   # ----------------------------------------------------------------------------
   # Job 3: TF-test
   # Runs pytest/tftest plan-based unit tests against examples/basic/.
-  # The Azure Service Principal authenticates the azurerm provider during the
-  # terraform plan subprocess calls made internally by tftest fixtures.
+  #
+  # Same two CI-only overrides as the speculative-plan job:
+  #   override.tf          — redirects module source to ../../
+  #   TF_VAR_subscription_id — Terraform automatically reads TF_VAR_* env vars,
+  #                            replacing the placeholder value in main.tf so the
+  #                            azurerm provider can authenticate during plan.
   #
   # This job name is a required GitHub Branch Protection status check —
   # do not rename it without updating the branch protection rule.
@@ -229,13 +236,14 @@ jobs:
     timeout-minutes: 30
     needs: validate
 
-    # ARM_* env vars are consumed by the azurerm provider inside tftest subprocess
-    # calls. They are masked automatically by GitHub Actions in all log output.
     env:
-      ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET:   ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID:       ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_CLIENT_ID:          ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET:      ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_TENANT_ID:          ${{ secrets.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID:    ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      # Terraform reads TF_VAR_* automatically — overrides the placeholder
+      # subscription_id in examples/basic/main.tf without touching the file.
+      TF_VAR_subscription_id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
 
     steps:
       - name: Checkout
@@ -257,13 +265,17 @@ jobs:
       - name: Install Python dependencies
         run: pip install pytest tftest
 
-      # tftest calls terraform init inside examples/basic which pulls this module
-      # from GitHub. Use the built-in token so no extra secret is needed.
-      - name: Configure git credentials for module source
+      # Same override as the speculative-plan job — redirect the module source
+      # to local ../../ so tftest's internal terraform init does not need the
+      # git tag to exist on the remote.
+      - name: Override module source to local path
         run: |
-          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          cat > examples/basic/override.tf << 'EOF'
+          module "spoke_vnet" {
+            source = "../../"
+          }
+          EOF
 
-      # continue-on-error so the comment step always runs, even on test failure.
       - name: Run pytest / tftest
         id: test
         run: |
@@ -273,7 +285,6 @@ jobs:
           set -e
         continue-on-error: true
 
-      # Replaces any previous test comment on this PR to keep the thread tidy.
       - name: Post Test Results to PR
         uses: actions/github-script@v7
         with:
