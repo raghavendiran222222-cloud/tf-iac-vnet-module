@@ -3,7 +3,6 @@ provider "azurerm" {
   subscription_id = var.subscription_id
 }
 
-provider "azapi" {}
 
 module "vnet" {
   source  = "Azure/avm-res-network-virtualnetwork/azurerm"
