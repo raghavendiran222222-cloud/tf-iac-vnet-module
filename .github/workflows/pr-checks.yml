@@ -67,7 +67,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: "1.15.1"
+          terraform_version: "1.9.8"
 
       # -check exits non-zero if any file diverges from canonical HCL format.
       # -recursive traverses all sub-directories including examples/.
@@ -118,7 +118,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: "1.15.1"
+          terraform_version: "1.9.8"
           # Disable the wrapper shim so tee + PIPESTATUS capture the raw exit code.
           terraform_wrapper: false
 
@@ -252,7 +252,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: "1.15.1"
+          terraform_version: "1.9.8"
           # tftest spawns terraform as a subprocess; the wrapper shim would
           # intercept stdout/stderr and break exit code propagation.
           terraform_wrapper: false
