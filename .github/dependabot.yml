@@ -1,0 +1,29 @@
+# dependabot.yml — automated dependency updates (§06 ALZ supply-chain security).
+#
+# GitHub Actions are pinned by SHA in all workflows. Dependabot submits PRs to
+# bump the SHA + tag comment when a new version is released, ensuring security
+# patches land automatically while keeping the SHA pins intact.
+#
+# Dependabot PRs target main and must pass branch protection checks before merge.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/New_York"
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: chore
+    groups:
+      # Group minor/patch updates into a single PR to reduce noise.
+      # Major version bumps (breaking changes) are kept separate for review.
+      minor-patch-actions:
+        update-types:
+          - minor
+          - patch

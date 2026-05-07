@@ -9,6 +9,7 @@ Versioning: [Semantic Versioning 2.0.0](https://semver.org/)
 ## [1.0.0] - 2026-05-06
 
 ### Added
+
 - Initial release of `tf-iac-vnet-module`.
 - Wraps Azure Verified Module `Azure/avm-res-network-virtualnetwork/azurerm` v0.17.1
   instead of raw `azurerm_virtual_network` resources, per FDD §2.3.5.
@@ -24,8 +25,9 @@ Versioning: [Semantic Versioning 2.0.0](https://semver.org/)
 - `.gitignore`, `README.MD`, `CHANGELOG.MD`.
 
 ### Version matrix (confirmed 2026-05-06)
+
 | Component | Version |
-|---|---|
+| --- | --- |
 | Terraform | >= 1.9.0, < 2.0.0 (latest: 1.15.1) |
 | hashicorp/azurerm | ~> 4.71 (latest: 4.71.0) |
 | Azure/azapi | ~> 2.9 (latest: 2.9.0) |

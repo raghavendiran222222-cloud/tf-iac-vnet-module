@@ -1,7 +1,11 @@
+# Terraform
 .terraform/
 .terraform.lock.hcl
 *.tfstate
 *.tfstate.backup
+*.tfplan
+tfplan
+tfplan.json
 override.tf
 override.tf.json
 *_override.tf
@@ -9,9 +13,31 @@ override.tf.json
 .terraformrc
 terraform.rc
 *.auto.tfvars
+terraform.tfvars.json
+crash.log
+crash.*.log
+
+# Python / pytest
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
+*.egg-info/
+dist/
+.venv/
+venv/
+
+# Security scan outputs
+checkov.sarif
+plan_output.txt
+
+# OS / editors
 .DS_Store
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# Devcontainer cache
+.devcontainer/.cache/

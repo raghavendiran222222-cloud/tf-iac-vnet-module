@@ -1,0 +1,17 @@
+# CODEOWNERS — maps file paths to required reviewers (§01 ALZ).
+# Every PR touching any file requires platform-engineering approval.
+# More specific patterns below override the catch-all.
+
+# Default: all files require platform-engineering review
+* @bdtmsd/platform-engineering
+
+# Module core — requires senior review
+*.tf @bdtmsd/platform-engineering
+
+# CI/CD workflows — any workflow change requires platform-engineering
+.github/workflows/ @bdtmsd/platform-engineering
+
+# Security-sensitive files
+.github/CODEOWNERS @bdtmsd/platform-engineering
+.pre-commit-config.yaml @bdtmsd/platform-engineering
+.tflint.hcl @bdtmsd/platform-engineering

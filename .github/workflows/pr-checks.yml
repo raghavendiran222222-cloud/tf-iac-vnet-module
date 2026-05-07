@@ -1,30 +1,36 @@
 # ==============================================================================
 # Workflow: PR Checks (pr-checks.yml)
 #
-# WHAT:   Three required status checks that must pass before any PR can merge
+# WHAT:   Four required status checks that must pass before any PR merges
 #         into main, enforcing the FDD §2.2.4 quality gate:
-#           1. TF Format & Validate  — formatting and schema correctness (root)
-#           2. HCP Terraform Speculative Plan — local terraform plan run against
-#              examples/basic with -backend=false; module source is redirected
-#              to ../../ via override.tf so no git tag needs to exist in CI.
-#           3. TF-test — pytest/tftest plan-based unit tests with Azure SP auth
+#           1. TF Format & Validate — fmt, validate, tflint (AzureRM ruleset)
+#           2. HCP Terraform Speculative Plan — local plan against examples/basic
+#              + Checkov security scan posted as PR comment
+#           3. TF-test — pytest/tftest plan-based unit tests
 #
-# WHEN:   Every pull_request event targeting the main branch.
+# WHEN:   pull_request to main, or manual workflow_dispatch.
 #         In-progress runs for the same PR are cancelled on new pushes.
 #
-# REQUIRED SECRETS (GitHub Settings > Secrets and variables > Actions):
-#   ARM_CLIENT_ID       - Azure Service Principal client ID
-#   ARM_CLIENT_SECRET   - Azure Service Principal client secret
-#   ARM_TENANT_ID       - Azure Entra ID tenant ID
-#   ARM_SUBSCRIPTION_ID - Azure subscription ID
+# AUTHENTICATION — OIDC federation (§05 ALZ best practices):
+#   azure/login@v2 exchanges a GitHub OIDC JWT for a short-lived Entra token.
+#   ARM_CLIENT_SECRET is never used or stored anywhere.
+#   Federated credential subject for PR jobs:
+#     repo:bdtmsd/tf-iac-vnet-module:pull_request
 #
-# STATUS CHECK NAMES (must be registered in Branch Protection exactly as shown):
+# REQUIRED VARIABLES (Settings > Secrets and variables > Variables):
+#   ARM_CLIENT_ID       - Service Principal client ID   (not sensitive)
+#   ARM_TENANT_ID       - Entra ID tenant ID            (not sensitive)
+#   ARM_SUBSCRIPTION_ID - Azure subscription ID         (not sensitive)
+#
+# NO SECRETS REQUIRED — ARM_CLIENT_SECRET must not be stored anywhere.
+#
+# STATUS CHECK NAMES (must match Branch Protection rules exactly):
 #   "TF Format & Validate"
 #   "HCP Terraform Speculative Plan"
 #   "TF-test"
 #
-# FUTURE:  Infracost cost-estimation step will be added to the speculative-plan
-#          job once the Infracost GitHub Action is approved for the pipeline.
+# SUPPLY CHAIN SECURITY — all Actions pinned by commit SHA (§06 ALZ):
+#   Tags are mutable; SHA pins are immutable. Dependabot keeps them current.
 # ==============================================================================
 
 name: PR Checks
@@ -33,27 +39,50 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
-# Cancel any previous run for the same PR the moment a new commit is pushed.
 concurrency:
-  group: pr-checks-${{ github.event.pull_request.number }}
+  group: pr-checks-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
-  contents: read       # checkout
-  pull-requests: write # post plan/test comments
-  id-token: write      # reserved for future OIDC expansion
+  contents: read
+  pull-requests: write
+  id-token: write        # required — lets the runner request an OIDC JWT from GitHub
+  security-events: write # required — upload Checkov SARIF to GitHub Security tab
 
 env:
-  TF_IN_AUTOMATION: "true"      # suppresses interactive prompts in all terraform calls
-  TF_CLI_ARGS_plan: "-no-color" # strip ANSI codes so PR comment renders cleanly
+  TF_IN_AUTOMATION: "true"
+  TF_CLI_ARGS_plan: "-no-color"
 
 jobs:
 
   # ----------------------------------------------------------------------------
+  # Job 0: Detect whether Azure variables are configured.
+  # Downstream jobs skip cleanly instead of failing when vars are not yet set.
+  # ----------------------------------------------------------------------------
+  check-secrets:
+    name: Check Azure Credentials
+    runs-on: ubuntu-latest
+    outputs:
+      has-azure-creds: ${{ steps.check.outputs.has-azure-creds }}
+    steps:
+      - name: Detect credentials
+        id: check
+        env:
+          ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+        run: |
+          if [[ -n "$ARM_CLIENT_ID" ]]; then
+            echo "has-azure-creds=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::ARM_CLIENT_ID variable not set — speculative-plan and tftest will be skipped."
+            echo "has-azure-creds=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ----------------------------------------------------------------------------
   # Job 1: TF Format & Validate
-  # Fast (<2 min) gate that catches formatting and schema errors before the
-  # heavier plan and test jobs are allowed to start.
+  # Static checks per ALZ §09 Layer 1 — runs on every commit, no Azure auth.
+  # Includes tflint with the AzureRM ruleset for provider-aware linting.
   # ----------------------------------------------------------------------------
   validate:
     name: TF Format & Validate
@@ -62,69 +91,84 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
         with:
           terraform_version: "1.9.8"
 
-      # -check exits non-zero if any file diverges from canonical HCL format.
-      # -recursive traverses all sub-directories including examples/.
       - name: Terraform Format Check
         run: terraform fmt -check -recursive .
 
-      # -backend=false skips remote state auth; validate only checks schema and
-      # expression types against the downloaded provider schema.
       - name: Terraform Init
         run: terraform init -backend=false
 
       - name: Terraform Validate
         run: terraform validate
 
+      # tflint with azurerm ruleset catches deprecated args and AzureRM-specific
+      # issues that terraform validate cannot see (§09 Layer 1).
+      - name: Setup tflint
+        uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
+        with:
+          tflint_version: v0.55.0
+
+      - name: tflint Init
+        run: tflint --init --config .tflint.hcl
+
+      - name: tflint
+        run: tflint --recursive --config "$(pwd)/.tflint.hcl"
+
   # ----------------------------------------------------------------------------
   # Job 2: HCP Terraform Speculative Plan
-  # Runs terraform plan locally against examples/basic with -backend=false.
+  # Local plan against examples/basic with -backend=false, followed by a
+  # Checkov security scan (§09 Layer 2 — policy-as-code on the plan).
+  # Plan + scan results posted as collapsible PR comments.
   #
-  # Two CI-only overrides are applied before init:
-  #   override.tf    — redirects module source from the git tag URL to ../../
-  #                    so init works before v1.0.0 tag exists on the repo.
-  #   -var flag      — replaces the placeholder subscription_id (00000000-...)
-  #                    with the real value from ARM_SUBSCRIPTION_ID secret so
-  #                    the azurerm provider can authenticate during plan.
-  #
-  # These overrides exist only in the runner's workspace; they are never
-  # committed to the repository.
-  #
-  # This job name is a required GitHub Branch Protection status check —
-  # do not rename it without updating the branch protection rule.
+  # Authentication: azure/login@v2 (OIDC) + ARM_USE_CLI=true per §05.
+  # This job name is a required Branch Protection status check.
   # ----------------------------------------------------------------------------
   speculative-plan:
     name: HCP Terraform Speculative Plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: validate
+    needs: [validate, check-secrets]
+    if: needs.check-secrets.outputs.has-azure-creds == 'true'
 
     env:
-      ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET:   ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID:       ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      # IDs are not sensitive — stored as vars (§05 ALZ best practice)
+      ARM_CLIENT_ID:       ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID:       ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      # Use Azure CLI auth so the azurerm provider picks up the token from
+      # the az login session established by azure/login@v2 above.
+      ARM_USE_CLI:         "true"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # OIDC login per ALZ §05 — no client secret, short-lived token only.
+      # Federated credential subject: repo:bdtmsd/tf-iac-vnet-module:pull_request
+      - name: Azure Login (OIDC)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id:       ${{ vars.ARM_CLIENT_ID }}
+          tenant-id:       ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
         with:
           terraform_version: "1.9.8"
-          # Disable the wrapper shim so tee + PIPESTATUS capture the raw exit code.
           terraform_wrapper: false
 
-      # Redirect the module source to the local checkout instead of the git tag.
-      # Terraform's override file mechanism replaces any matching block attribute,
-      # so this cleanly overrides only the source without touching other inputs.
+      # Redirect module source to local ../../ — tag v1.0.0 may not exist yet.
       - name: Override module source to local path
         run: |
           cat > examples/basic/override.tf << 'EOF'
@@ -137,24 +181,44 @@ jobs:
         working-directory: examples/basic
         run: terraform init -backend=false
 
-      # -var overrides the placeholder subscription_id in main.tf with the real
-      # value so the azurerm provider can authenticate against Azure during plan.
-      # The secret value is passed via env var — never interpolated into the log.
       - name: Terraform Plan
         id: plan
         working-directory: examples/basic
         run: |
           terraform plan -backend=false -no-color \
             -var "subscription_id=$ARM_SUBSCRIPTION_ID" \
+            -out=tfplan \
             2>&1 | tee "${{ github.workspace }}/plan_output.txt"
+          terraform show -json tfplan > "${{ github.workspace }}/tfplan.json"
           echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
-      # Replaces any previous plan comment on this PR to keep the thread tidy.
+      # Checkov scans the plan JSON for security issues — §09 Layer 2.
+      # SARIF output uploads findings to the GitHub Security tab.
+      # soft_fail: false per ALZ §09 anti-pattern — always surface findings.
+      - name: Checkov security scan
+        id: checkov
+        uses: bridgecrewio/checkov-action@9201a8e6eaa919e3444d7c4ca691896efde4f033 # v12.3101.0
+        with:
+          file: tfplan.json
+          framework: terraform_plan
+          output_format: sarif
+          output_file_path: checkov.sarif
+          soft_fail: false
+        continue-on-error: true
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
+        with:
+          sarif_file: checkov.sarif
+        continue-on-error: true
+
       - name: Post Plan Output to PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
-          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          PLAN_EXITCODE:    ${{ steps.plan.outputs.exitcode }}
+          CHECKOV_OUTCOME:  ${{ steps.checkov.outcome }}
         with:
           script: |
             const fs   = require('fs');
@@ -170,12 +234,15 @@ jobs:
               : raw;
 
             const exitCode = process.env.PLAN_EXITCODE;
-            const status   = exitCode === '0' ? '✅ Plan succeeded' : '❌ Plan failed';
+            const planStatus = exitCode === '0' ? '✅ Plan succeeded' : '❌ Plan failed';
+            const checkovStatus = process.env.CHECKOV_OUTCOME === 'success'
+              ? '✅ Checkov clean'
+              : '⚠️ Checkov findings (see Security tab)';
 
             const body = [
-              `## HCP Terraform Speculative Plan — ${status}`,
+              `## HCP Terraform Speculative Plan — ${planStatus} · ${checkovStatus}`,
               '',
-              '> Plan ran locally against `examples/basic` with `-backend=false`.',
+              '> Plan ran locally against `examples/basic` with `-backend=false`. Security findings in the GitHub Security tab.',
               '',
               '<details><summary>Click to expand plan output</summary>',
               '',
@@ -219,55 +286,51 @@ jobs:
 
   # ----------------------------------------------------------------------------
   # Job 3: TF-test
-  # Runs pytest/tftest plan-based unit tests against examples/basic/.
-  #
-  # Same two CI-only overrides as the speculative-plan job:
-  #   override.tf          — redirects module source to ../../
-  #   TF_VAR_subscription_id — Terraform automatically reads TF_VAR_* env vars,
-  #                            replacing the placeholder value in main.tf so the
-  #                            azurerm provider can authenticate during plan.
-  #
-  # This job name is a required GitHub Branch Protection status check —
-  # do not rename it without updating the branch protection rule.
+  # pytest/tftest plan-based unit tests (§09 Layer 2 — module test coverage).
+  # Authentication: same azure/login@v2 OIDC pattern as speculative-plan.
+  # This job name is a required Branch Protection status check.
   # ----------------------------------------------------------------------------
   tftest:
     name: TF-test
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: validate
+    needs: [validate, check-secrets]
+    if: needs.check-secrets.outputs.has-azure-creds == 'true'
 
     env:
-      ARM_CLIENT_ID:          ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET:      ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID:          ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID:    ${{ secrets.ARM_SUBSCRIPTION_ID }}
-      # Terraform reads TF_VAR_* automatically — overrides the placeholder
-      # subscription_id in examples/basic/main.tf without touching the file.
-      TF_VAR_subscription_id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_CLIENT_ID:          ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID:          ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID:    ${{ vars.ARM_SUBSCRIPTION_ID }}
+      ARM_USE_CLI:            "true"
+      TF_VAR_subscription_id: ${{ vars.ARM_SUBSCRIPTION_ID }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id:       ${{ vars.ARM_CLIENT_ID }}
+          tenant-id:       ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
         with:
           terraform_version: "1.9.8"
-          # tftest spawns terraform as a subprocess; the wrapper shim would
-          # intercept stdout/stderr and break exit code propagation.
           terraform_wrapper: false
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.13"
 
       - name: Install Python dependencies
         run: pip install pytest tftest
 
-      # Same override as the speculative-plan job — redirect the module source
-      # to local ../../ so tftest's internal terraform init does not need the
-      # git tag to exist on the remote.
       - name: Override module source to local path
         run: |
           cat > examples/basic/override.tf << 'EOF'
@@ -286,7 +349,7 @@ jobs:
         continue-on-error: true
 
       - name: Post Test Results to PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs   = require('fs');
