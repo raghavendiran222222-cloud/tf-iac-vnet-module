@@ -12,11 +12,18 @@
 # WHEN:   Every pull_request event targeting the main branch.
 #         In-progress runs for the same PR are cancelled on new pushes.
 #
-# REQUIRED SECRETS (GitHub Settings > Secrets and variables > Actions):
-#   ARM_CLIENT_ID       - Azure Service Principal client ID
-#   ARM_CLIENT_SECRET   - Azure Service Principal client secret
-#   ARM_TENANT_ID       - Azure Entra ID tenant ID
-#   ARM_SUBSCRIPTION_ID - Azure subscription ID
+# AUTHENTICATION — OIDC federation (no long-lived secret stored anywhere):
+#   The azurerm provider exchanges a GitHub-issued OIDC JWT for a short-lived
+#   (~1h) Entra access token. ARM_CLIENT_SECRET is never used or stored.
+#   Configure a federated credential on the SPN with subject:
+#     repo:bdtmsd/tf-iac-vnet-module:pull_request
+#
+# REQUIRED VARIABLES (GitHub Settings > Secrets and variables > Variables):
+#   ARM_CLIENT_ID       - Azure Service Principal client ID   (not sensitive)
+#   ARM_TENANT_ID       - Azure Entra ID tenant ID            (not sensitive)
+#   ARM_SUBSCRIPTION_ID - Azure subscription ID               (not sensitive)
+#
+# NO SECRETS REQUIRED — ARM_CLIENT_SECRET must not be stored anywhere.
 #
 # STATUS CHECK NAMES (must be registered in Branch Protection exactly as shown):
 #   "TF Format & Validate"
@@ -42,7 +49,7 @@ concurrency:
 permissions:
   contents: read       # checkout
   pull-requests: write # post plan/test comments
-  id-token: write      # reserved for future OIDC expansion
+  id-token: write      # required — lets the runner request an OIDC JWT from GitHub
 
 env:
   TF_IN_AUTOMATION: "true"      # suppresses interactive prompts in all terraform calls
@@ -61,15 +68,15 @@ jobs:
     outputs:
       has-azure-creds: ${{ steps.check.outputs.has-azure-creds }}
     steps:
-      - name: Detect secrets
+      - name: Detect credentials
         id: check
         env:
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
         run: |
           if [[ -n "$ARM_CLIENT_ID" ]]; then
             echo "has-azure-creds=true"  >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::ARM_CLIENT_ID secret not set — speculative-plan and tftest will be skipped."
+            echo "::warning::ARM_CLIENT_ID variable not set — speculative-plan and tftest will be skipped."
             echo "has-azure-creds=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -130,10 +137,13 @@ jobs:
     if: needs.check-secrets.outputs.has-azure-creds == 'true'
 
     env:
-      ARM_CLIENT_ID:       ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET:   ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID:       ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      # IDs are not sensitive — stored as vars, not secrets (per ALZ best practice §05)
+      ARM_CLIENT_ID:       ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID:       ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      # OIDC: provider exchanges the GitHub JWT for a short-lived Entra access token.
+      # No ARM_CLIENT_SECRET is needed or stored anywhere.
+      ARM_USE_OIDC:        "true"
 
     steps:
       - name: Checkout
@@ -262,13 +272,16 @@ jobs:
     if: needs.check-secrets.outputs.has-azure-creds == 'true'
 
     env:
-      ARM_CLIENT_ID:          ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET:      ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID:          ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID:    ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      # IDs are not sensitive — stored as vars, not secrets (per ALZ best practice §05)
+      ARM_CLIENT_ID:          ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID:          ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID:    ${{ vars.ARM_SUBSCRIPTION_ID }}
+      # OIDC: provider exchanges the GitHub JWT for a short-lived Entra access token.
+      # No ARM_CLIENT_SECRET is needed or stored anywhere.
+      ARM_USE_OIDC:           "true"
       # Terraform reads TF_VAR_* automatically — overrides the placeholder
       # subscription_id in examples/basic/main.tf without touching the file.
-      TF_VAR_subscription_id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ vars.ARM_SUBSCRIPTION_ID }}
 
     steps:
       - name: Checkout
