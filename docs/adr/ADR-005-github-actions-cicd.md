@@ -15,6 +15,7 @@ The module repository needs CI/CD for PR validation (static checks, speculative 
 ## Decision
 
 Use **GitHub Actions** with three workflow files:
+
 - `feature-checks.yml` — static checks on feature branches (no Azure auth)
 - `pr-checks.yml` — full quality gate on PRs to main (OIDC auth, plan, tests)
 - `release.yml` — automated release lifecycle via release-please

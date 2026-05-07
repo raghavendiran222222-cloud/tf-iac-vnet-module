@@ -120,7 +120,7 @@ jobs:
         run: tflint --init --config .tflint.hcl
 
       - name: tflint
-        run: tflint --recursive --config .tflint.hcl
+        run: tflint --recursive --config "$(pwd)/.tflint.hcl"
 
   # ----------------------------------------------------------------------------
   # Job 2: HCP Terraform Speculative Plan

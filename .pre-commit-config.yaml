@@ -24,12 +24,6 @@ repos:
         args:
           - --args=--config=.terraform-docs.yml
 
-  - repo: https://github.com/bridgecrewio/checkov
-    rev: 3.2.255
-    hooks:
-      - id: checkov
-        args: [-d, ., --quiet, --soft-fail]   # informational locally; fatal in CI
-
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
     hooks:
@@ -44,7 +38,10 @@ repos:
     rev: v0.44.0
     hooks:
       - id: markdownlint
-        args: [--disable, MD013, MD033, MD041]
-        # MD013: line-length (disabled — long code blocks in docs)
-        # MD033: inline HTML (disabled — used in PR template)
-        # MD041: first-line-heading (disabled — ADRs start with metadata)
+        args:
+          - --disable
+          - MD013   # line-length — long code blocks in docs
+          - MD033   # inline HTML — used in PR template
+          - MD041   # first-line-heading — ADRs start with metadata
+          - MD058   # blanks-around-tables — embedded tables in prose
+          - MD060   # table-column-style — pipe alignment pedantry

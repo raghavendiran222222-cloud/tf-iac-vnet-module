@@ -20,6 +20,7 @@ make bootstrap   # installs pre-commit hooks + terraform init
 **Option A (container):** Open in VS Code → "Reopen in Container" (uses `.devcontainer/devcontainer.json`). All tools are pre-installed.
 
 **Option B (local):** Install [mise](https://mise.jdx.dev/) and run:
+
 ```bash
 mise install     # installs terraform 1.9.8 + python 3.13
 pip install pre-commit pytest tftest
@@ -58,6 +59,7 @@ make plan                  # creates override.tf, inits, plans examples/basic
 ## Branch protection rules (for reference)
 
 All PRs to `main` require:
+
 - `TF Format & Validate` check passing
 - `HCP Terraform Speculative Plan` check passing (if Azure vars configured)
 - `TF-test` check passing (if Azure vars configured)

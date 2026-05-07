@@ -6,6 +6,7 @@
 ## When to use this runbook
 
 Use when:
+
 - A GitHub Secret or Azure credential is suspected to be exposed (committed to Git, visible in CI logs, leaked via a third-party tool).
 - A Gitleaks or GitHub secret-scanning alert fires.
 - A suspicious sign-in appears in Entra ID logs for the CI service principal.
@@ -45,6 +46,7 @@ az monitor activity-log list \
 Also check Entra ID → Monitoring → Sign-in logs → Filter by Application = `sp-alz-vnet-ci`.
 
 Look for:
+
 - Sign-ins outside GitHub's IP ranges (published at [GitHub meta API](https://api.github.com/meta)).
 - Sign-ins with subject claims that don't match `pull_request`.
 - Any new role assignments made by the SPN.
@@ -77,6 +79,7 @@ git push origin --force --all
 ### 6. Postmortem
 
 Open an issue within 48h with:
+
 - Timeline of events.
 - Root cause.
 - Preventive measures taken.

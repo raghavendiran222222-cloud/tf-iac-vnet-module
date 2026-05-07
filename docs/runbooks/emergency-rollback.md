@@ -6,6 +6,7 @@
 ## When to use this runbook
 
 Use when:
+
 - A newly released module version (`vX.Y.Z`) causes `terraform plan` failures or unexpected resource changes in consumer stacks.
 - A regression is confirmed and cannot be hotfixed quickly.
 
@@ -36,11 +37,13 @@ gh release edit v1.3.0 --prerelease --notes "⚠️ RETRACTED — regression in 
 ## Option C — Hotfix release (preferred for quick fix)
 
 1. Create a branch from the broken tag:
+
    ```bash
    git checkout -b hotfix/v1.3.1 v1.3.0
    ```
 
 2. Apply the fix and commit with `fix:` prefix:
+
    ```bash
    git commit -m "fix(subnets): correct delegation schema transformation"
    ```
@@ -55,7 +58,7 @@ gh release edit v1.3.0 --prerelease --notes "⚠️ RETRACTED — regression in 
 
 ## Communication template
 
-```
+```text
 Subject: [tf-iac-vnet-module] v1.3.0 regression — pin to v1.2.3
 
 A regression was identified in v1.3.0 affecting [describe impact].
