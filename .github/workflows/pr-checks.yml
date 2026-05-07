@@ -215,7 +215,7 @@ jobs:
         continue-on-error: true
 
       - name: Post Plan Output to PR
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PLAN_EXITCODE:    ${{ steps.plan.outputs.exitcode }}
           CHECKOV_OUTCOME:  ${{ steps.checkov.outcome }}
@@ -349,7 +349,7 @@ jobs:
         continue-on-error: true
 
       - name: Post Test Results to PR
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs   = require('fs');
