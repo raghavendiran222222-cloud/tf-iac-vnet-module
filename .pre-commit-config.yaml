@@ -7,6 +7,8 @@ repos:
       - id: check-yaml
       - id: check-json
       - id: check-added-large-files
+      - id: mixed-line-ending
+        args: [--fix=lf]
 
   - repo: https://github.com/antonbabenko/pre-commit-terraform
     rev: v1.99.0
@@ -26,7 +28,7 @@ repos:
     rev: 3.2.255
     hooks:
       - id: checkov
-        args: [-d, ., --quiet, --soft-fail]
+        args: [-d, ., --quiet, --soft-fail]   # informational locally; fatal in CI
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.4
@@ -37,3 +39,12 @@ repos:
     rev: v1.7.7
     hooks:
       - id: actionlint
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.44.0
+    hooks:
+      - id: markdownlint
+        args: [--disable, MD013, MD033, MD041]
+        # MD013: line-length (disabled — long code blocks in docs)
+        # MD033: inline HTML (disabled — used in PR template)
+        # MD041: first-line-heading (disabled — ADRs start with metadata)
