@@ -28,7 +28,20 @@
 #   contents: write      — create tags and GitHub Releases
 #   pull-requests: write — create and update the Release PR
 #
-# NO SECRETS REQUIRED — uses built-in GITHUB_TOKEN only.
+# AUTHENTICATION:
+#   Uses a Personal Access Token (PAT) stored as secret RELEASE_PLEASE_TOKEN
+#   instead of the built-in GITHUB_TOKEN.
+#
+#   WHY: GitHub organisations can restrict GITHUB_TOKEN from creating PRs.
+#   A PAT issued by a human account bypasses this org-level restriction.
+#
+#   SETUP (one-time):
+#     1. Go to github.com → Settings → Developer settings → Personal access tokens
+#        → Fine-grained tokens → Generate new token
+#     2. Set resource owner to "bdtmsd" (the org), select this repository.
+#     3. Grant permissions: Contents (read & write), Pull requests (read & write).
+#     4. Go to repo Settings → Secrets and variables → Actions → New secret
+#        Name: RELEASE_PLEASE_TOKEN, value: <the token you just created>
 #
 # CONFIG FILES:
 #   release-please-config.json       — release-please package config
@@ -76,7 +89,11 @@ jobs:
         with:
           config-file:   release-please-config.json
           manifest-file: .release-please-manifest.json
-          token:         ${{ secrets.GITHUB_TOKEN }}
+          # RELEASE_PLEASE_TOKEN is a fine-grained PAT with Contents + Pull requests
+          # write permission. Required because the org blocks GITHUB_TOKEN from
+          # creating PRs (org-level "Allow GitHub Actions to create pull requests"
+          # is disabled and cannot be changed without org-admin access).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
 
   # ----------------------------------------------------------------------------
   # Job 2: Post-release
